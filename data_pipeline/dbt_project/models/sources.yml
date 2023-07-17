@@ -1,0 +1,10 @@
+version: 2
+
+sources:
+  - name: world
+    schema: public
+    tables:
+      - name: City
+        identifier: city
+      - name: country
+      - name: countrylanguage

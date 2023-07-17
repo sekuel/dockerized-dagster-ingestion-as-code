@@ -1,0 +1,142 @@
+version: "2.17.2"
+
+services:
+  # This service runs the postgres DB used by dagster for run storage, schedule storage,
+  # and event log storage.
+  dagster_postgresql:
+    image: postgres
+    container_name: dagster_postgresql
+    environment:
+      POSTGRES_USER: "${DAGSTER_POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${DAGSTER_POSTGRES_PASSWORD}"
+      POSTGRES_DB: "${DAGSTER_POSTGRES_DB}"
+    networks:
+      - dagster_network
+    volumes:
+      - dagster-postgres:/var/lib/postgresql/data
+
+  dest_postgres:
+    image: postgres
+    container_name: dest_postgres
+    environment:
+      POSTGRES_USER: postgresuser
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: dest_postgres
+    networks:
+      - dagster_network
+      - airbyte_airbyte_public
+    ports:
+        - 50005:5432
+    volumes:
+      - dest-postgres:/var/lib/postgresql/data
+
+  # This service runs the gRPC server that loads your user code, in both dagit
+  # and dagster-daemon. By setting DAGSTER_CURRENT_IMAGE to its own image, we tell the
+  # run launcher to use this same image when launching runs in a new container as well.
+  # Multiple containers like this can be deployed separately - each just needs to run on
+  # its own port, and have its own entry in the workspace.yaml file that's loaded by dagit.
+  dagster_pipelines:
+    build:
+      context: .
+      dockerfile: dagster_pipelines.Dockerfile
+    container_name: dagster_pipelines
+    image: dagster_pipelines_image
+    pull_policy: always
+    restart: always
+    environment:
+      DAGSTER_POSTGRES_HOSTNAME: "${DAGSTER_POSTGRES_HOSTNAME}"
+      DAGSTER_POSTGRES_USER: "${DAGSTER_POSTGRES_USER}"
+      DAGSTER_POSTGRES_PASSWORD: "${DAGSTER_POSTGRES_PASSWORD}"
+      DAGSTER_POSTGRES_DB: "${DAGSTER_POSTGRES_DB}"
+      DAGSTER_CURRENT_IMAGE: "dagster_pipelines_image"
+      DBT_SERVICE_ACCOUNT_BQ_CLIENT_EMAIL: "${DBT_SERVICE_ACCOUNT_BQ_CLIENT_EMAIL}"
+      DBT_SERVICE_ACCOUNT_CLIENT_ID: "${DBT_SERVICE_ACCOUNT_CLIENT_ID}"
+      DBT_SERVICE_ACCOUNT_CLIENT_CERT_URL: "${DBT_SERVICE_ACCOUNT_CLIENT_CERT_URL}"
+      DBT_SERVICE_ACCOUNT_PRIVATE_KEY_ID: "${DBT_SERVICE_ACCOUNT_PRIVATE_KEY_ID}"
+      DBT_SERVICE_ACCOUNT_PROJECT_ID: "${DBT_SERVICE_ACCOUNT_PROJECT_ID}"
+      DBT_SERVICE_ACCOUNT_PRIVATE_KEY: "${DBT_SERVICE_ACCOUNT_PRIVATE_KEY}"
+    networks:
+      - dagster_network
+      - airbyte_airbyte_public
+    volumes:
+      - ./data_pipeline:/opt/dagster/app
+
+  # This service runs dagit, which loads the pipelines from the user code container.
+  # Since our instance uses the QueuedRunCoordinator, any runs submitted from dagit will be put on
+  # a queue and later dequeued and launched by dagster-daemon.
+  dagit:
+    build:
+      context: .
+      dockerfile: ./daemon_dagit.Dockerfile
+    entrypoint:
+      - dagit
+      - -h
+      - "0.0.0.0"
+      - -p
+      - "3000"
+      - -w
+      - workspace.yaml
+    container_name: dagit
+    image: dagit_image
+    expose:
+      - "3000"
+    ports:
+      - "3000:3000"
+    environment:
+      DAGSTER_POSTGRES_HOSTNAME: "${DAGSTER_POSTGRES_HOSTNAME}"
+      DAGSTER_POSTGRES_USER: "${DAGSTER_POSTGRES_USER}"
+      DAGSTER_POSTGRES_PASSWORD: "${DAGSTER_POSTGRES_PASSWORD}"
+      DAGSTER_POSTGRES_DB: "${DAGSTER_POSTGRES_DB}"
+    volumes: # Make docker client accessible so we can terminate containers from dagit
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - dagster_network
+      - airbyte_airbyte_public
+    depends_on:
+      - dagster_postgresql
+      - dagster_pipelines
+
+  # This service runs the dagster-daemon process, which is responsible for taking runs
+  # off of the queue and launching them, as well as creating runs from schedules or sensors.
+  dagster_daemon:
+    build:
+      context: .
+      dockerfile: ./daemon_dagit.Dockerfile
+    entrypoint:
+      - dagster-daemon
+      - run
+    container_name: dagster_daemon
+    image: dagster_daemon_image
+    restart: on-failure
+  # Make sure to use the same environment vars as the dagster_pipelines service
+    environment:
+      DAGSTER_POSTGRES_HOSTNAME: "${DAGSTER_POSTGRES_HOSTNAME}"
+      DAGSTER_POSTGRES_USER: "${DAGSTER_POSTGRES_USER}"
+      DAGSTER_POSTGRES_PASSWORD: "${DAGSTER_POSTGRES_PASSWORD}"
+      DAGSTER_POSTGRES_DB: "${DAGSTER_POSTGRES_DB}"
+      DBT_SERVICE_ACCOUNT_BQ_CLIENT_EMAIL: "${DBT_SERVICE_ACCOUNT_BQ_CLIENT_EMAIL}"
+      DBT_SERVICE_ACCOUNT_CLIENT_ID: "${DBT_SERVICE_ACCOUNT_CLIENT_ID}"
+      DBT_SERVICE_ACCOUNT_CLIENT_CERT_URL: "${DBT_SERVICE_ACCOUNT_CLIENT_CERT_URL}"
+      DBT_SERVICE_ACCOUNT_PRIVATE_KEY_ID: "${DBT_SERVICE_ACCOUNT_PRIVATE_KEY_ID}"
+      DBT_SERVICE_ACCOUNT_PROJECT_ID: "${DBT_SERVICE_ACCOUNT_PROJECT_ID}"
+      DBT_SERVICE_ACCOUNT_PRIVATE_KEY: "${DBT_SERVICE_ACCOUNT_PRIVATE_KEY}"
+    volumes: # Make docker client accessible so we can launch containers using host docker
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data_pipeline:/opt/dagster/app
+    networks:
+      - dagster_network
+      - airbyte_airbyte_public
+    depends_on:
+      - dagster_postgresql
+      - dagster_pipelines
+
+networks:
+  dagster_network:
+    driver: bridge
+    name: dagster_network
+  airbyte_airbyte_public:
+    name: airbyte_airbyte_public
+    external: true
+volumes:
+  dagster-postgres:
+  dest-postgres:
